@@ -835,7 +835,18 @@ static int cmd_logs(int argc, char *argv[])
     strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
 
     if (send_control_request(&req, &resp) == 0) {
-        printf("%s\n", resp.message);
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s.log", LOG_DIR, argv[2]);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            char buf[1024];
+            while (fgets(buf, sizeof(buf), f)) {
+                fputs(buf, stdout);
+            }
+            fclose(f);
+        } else {
+            fprintf(stderr, "Log file for %s doesn't exist yet.\n", argv[2]);
+        }
         return 0;
     }
     return 1;
