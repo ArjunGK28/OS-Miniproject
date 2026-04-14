@@ -361,7 +361,9 @@ void *logging_thread(void *arg)
         snprintf(path, sizeof(path), "%s/%s.log", LOG_DIR, item.container_id);
         int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd >= 0) {
-            write(fd, item.data, item.length);
+            if (write(fd, item.data, item.length) < 0) {
+                /* ignore */
+            }
             close(fd);
         }
     }
@@ -387,7 +389,9 @@ int child_fn(void *arg)
     close(cfg->log_write_fd);
 
     if (cfg->nice_value != 0) {
-        nice(cfg->nice_value);
+        if (nice(cfg->nice_value) < 0) {
+            /* ignore */
+        }
     }
 
     if (chroot(cfg->rootfs) != 0) return 1;
@@ -627,7 +631,7 @@ static int run_supervisor(const char *rootfs)
     supervisor_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     
-    ctx.monitor_fd = open("/dev/" DEVICE_NAME, O_RDWR);
+    ctx.monitor_fd = open("/dev/container_monitor", O_RDWR);
     if (ctx.monitor_fd < 0) perror("Warning: /dev/container_monitor missing");
 
     if (pthread_mutex_init(&ctx.metadata_lock, NULL) != 0) return 1;
