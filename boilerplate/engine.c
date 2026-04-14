@@ -394,12 +394,27 @@ int child_fn(void *arg)
         }
     }
 
-    if (chroot(cfg->rootfs) != 0) return 1;
-    if (chdir("/") != 0) return 1;
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) return 1;
+    if (chroot(cfg->rootfs) != 0) {
+        fprintf(stderr, "[Setup Error] chroot('%s') failed: %s\n", cfg->rootfs, strerror(errno));
+        return 1;
+    }
+    
+    if (chdir("/") != 0) {
+        fprintf(stderr, "[Setup Error] chdir('/') failed: %s\n", strerror(errno));
+        return 1;
+    }
+    
+    // Sometimes /proc needs to be created or namespaces need a private mount flag.
+    // We attempt generic mount first.
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        fprintf(stderr, "[Setup Error] mount('proc') failed: %s\n", strerror(errno));
+        return 1;
+    }
 
     char *args[] = {"/bin/sh", "-c", cfg->command, NULL};
     execv("/bin/sh", args);
+    
+    fprintf(stderr, "[Setup Error] execv('/bin/sh') failed: %s\n", strerror(errno));
     return 1;
 }
 
