@@ -77,6 +77,7 @@ typedef struct container_record {
     int exit_signal;
     char log_path[PATH_MAX];
     int stop_requested; /* Added to track graceful kills */
+    int wait_fd;        /* Socket fd for blocking run/wait client */
     struct container_record *next;
 } container_record_t;
 
@@ -351,21 +352,64 @@ int bounded_buffer_pop(bounded_buffer_t *buffer, log_item_t *item)
  *   - route each chunk to the correct per-container log file
  *   - exit cleanly when shutdown begins and pending work is drained
  */
+#define MAX_FD_CACHE 128
+typedef struct {
+    char id[CONTAINER_ID_LEN];
+    int fd;
+} log_cache_item_t;
+
 void *logging_thread(void *arg)
 {
     supervisor_ctx_t *ctx = (supervisor_ctx_t *)arg;
     log_item_t item;
-    char path[PATH_MAX];
+    log_cache_item_t cache[MAX_FD_CACHE];
+    int cache_count = 0;
+    
     mkdir(LOG_DIR, 0755);
+    
     while (bounded_buffer_pop(&ctx->log_buffer, &item) == 0) {
-        snprintf(path, sizeof(path), "%s/%s.log", LOG_DIR, item.container_id);
-        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        int fd = -1;
+        int cache_idx = -1;
+        
+        for (int i = 0; i < cache_count; i++) {
+            if (strcmp(cache[i].id, item.container_id) == 0) {
+                fd = cache[i].fd;
+                cache_idx = i;
+                break;
+            }
+        }
+
+        if (item.length == 0) {
+            /* EOF marker, close the file and remove from cache */
+            if (cache_idx >= 0) {
+                close(fd);
+                cache[cache_idx] = cache[cache_count - 1];
+                cache_count--;
+            }
+            continue;
+        }
+
+        if (fd < 0) {
+            char path[PATH_MAX];
+            snprintf(path, sizeof(path), "%s/%s.log", LOG_DIR, item.container_id);
+            fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd >= 0 && cache_count < MAX_FD_CACHE) {
+                strcpy(cache[cache_count].id, item.container_id);
+                cache[cache_count].fd = fd;
+                cache_count++;
+            }
+        }
+
         if (fd >= 0) {
             if (write(fd, item.data, item.length) < 0) {
                 /* ignore */
             }
-            close(fd);
         }
+    }
+    
+    // Shutting down, close remaining FDs
+    for (int i = 0; i < cache_count; i++) {
+        close(cache[i].fd);
     }
     return NULL;
 }
@@ -392,6 +436,11 @@ int child_fn(void *arg)
         if (nice(cfg->nice_value) < 0) {
             /* ignore */
         }
+    }
+
+    if (mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL) != 0) {
+        fprintf(stderr, "[Setup Error] mount('MS_PRIVATE') failed: %s\n", strerror(errno));
+        return 1;
     }
 
     if (chroot(cfg->rootfs) != 0) {
@@ -469,6 +518,11 @@ void *pipe_reader_thread(void *arg) {
         item.length = n;
         if (bounded_buffer_push(args->buffer, &item) < 0) break;
     }
+    
+    /* Push EOF marker to close the file descriptor */
+    item.length = 0;
+    bounded_buffer_push(args->buffer, &item);
+    
     close(args->read_fd);
     free(args);
     return NULL;
@@ -492,6 +546,16 @@ static void reap_children(supervisor_ctx_t *ctx) {
                     else rec->state = CONTAINER_EXITED;
                 }
                 if (ctx->monitor_fd >= 0) unregister_from_monitor(ctx->monitor_fd, rec->id, pid);
+                
+                if (rec->wait_fd >= 0) {
+                    control_response_t resp;
+                    memset(&resp, 0, sizeof(resp));
+                    resp.status = 0;
+                    snprintf(resp.message, sizeof(resp.message), "Ended with code %d signal %d", rec->exit_code, rec->exit_signal);
+                    send(rec->wait_fd, &resp, sizeof(resp), 0);
+                    close(rec->wait_fd);
+                    rec->wait_fd = -1;
+                }
                 break;
             }
             rec = rec->next;
@@ -499,12 +563,12 @@ static void reap_children(supervisor_ctx_t *ctx) {
     }
 }
 
-static void handle_client(supervisor_ctx_t *ctx, int client_fd) {
+static int handle_client(supervisor_ctx_t *ctx, int client_fd) {
     control_request_t req;
     control_response_t resp;
     memset(&resp, 0, sizeof(resp));
 
-    if (recv(client_fd, &req, sizeof(req), 0) <= 0) return;
+    if (recv(client_fd, &req, sizeof(req), 0) <= 0) return 0;
 
     pthread_mutex_lock(&ctx->metadata_lock);
 
@@ -546,6 +610,7 @@ static void handle_client(supervisor_ctx_t *ctx, int client_fd) {
                         new_rec->soft_limit_bytes = req.soft_limit_bytes;
                         new_rec->hard_limit_bytes = req.hard_limit_bytes;
                         snprintf(new_rec->log_path, sizeof(new_rec->log_path), "%s/%s.log", LOG_DIR, new_rec->id);
+                        new_rec->wait_fd = -1;
                         new_rec->next = ctx->containers;
                         ctx->containers = new_rec;
 
@@ -610,7 +675,14 @@ static void handle_client(supervisor_ctx_t *ctx, int client_fd) {
             if (strcmp(rec->id, req.container_id) == 0) {
                 found = 1;
                 if (rec->state == CONTAINER_RUNNING) {
-                    resp.status = 1; // 1 signals it is still holding/running
+                    if (rec->wait_fd >= 0) {
+                        resp.status = 1;
+                        strcpy(resp.message, "Another client is already waiting on this container");
+                        break;
+                    }
+                    rec->wait_fd = client_fd;
+                    pthread_mutex_unlock(&ctx->metadata_lock);
+                    return 1; /* Return 1 to tell supervisor NOT to close client_fd */
                 } else {
                     resp.status = 0;
                     snprintf(resp.message, sizeof(resp.message), "Ended with code %d signal %d", rec->exit_code, rec->exit_signal);
@@ -627,6 +699,7 @@ static void handle_client(supervisor_ctx_t *ctx, int client_fd) {
 
     pthread_mutex_unlock(&ctx->metadata_lock);
     send(client_fd, &resp, sizeof(resp), 0);
+    return 0;
 }
 
 
@@ -691,8 +764,9 @@ static int run_supervisor(const char *rootfs)
             break;
         }
 
-        handle_client(&ctx, client_fd);
-        close(client_fd);
+        if (handle_client(&ctx, client_fd) == 0) {
+            close(client_fd);
+        }
     }
 
     bounded_buffer_begin_shutdown(&ctx.log_buffer);
@@ -786,24 +860,64 @@ static int cmd_run(int argc, char *argv[])
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    int wait_sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (wait_sock < 0) return 1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+    
+    if (connect(wait_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(wait_sock);
+        fprintf(stderr, "Wait failed: cannot connect to supervisor.\n");
+        return 1;
+    }
+
     control_request_t req;
-    control_response_t resp;
     memset(&req, 0, sizeof(req));
     req.kind = CMD_WAIT;
     strncpy(req.container_id, argv[2], sizeof(req.container_id) - 1);
 
-    while (!g_client_sigint) {
-        usleep(500000); // Poll every 500ms
-        if (send_control_request(&req, &resp) == 0 && resp.status == 0) {
+    if (send(wait_sock, &req, sizeof(req), 0) <= 0) {
+        close(wait_sock);
+        return 1;
+    }
+
+    control_response_t resp;
+    while (1) {
+        if (g_client_sigint) {
+            g_client_sigint = 0;
+            printf("\nForwarding termination directly to container...\n");
+            
+            control_request_t stop_req;
+            control_response_t stop_resp;
+            memset(&stop_req, 0, sizeof(stop_req));
+            stop_req.kind = CMD_STOP;
+            strncpy(stop_req.container_id, argv[2], sizeof(stop_req.container_id) - 1);
+            if (send_control_request(&stop_req, &stop_resp) != 0) {
+                fprintf(stderr, "[Error] Failed to forward stop request.\n");
+            }
+        }
+
+        int n = recv(wait_sock, &resp, sizeof(resp), 0);
+        if (n > 0) {
+            if (resp.status == 1) {
+                printf("%s\n", resp.message);
+                close(wait_sock);
+                return 1;
+            }
             printf("%s\n", resp.message);
+            close(wait_sock);
             return 0;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            fprintf(stderr, "Disconnected from supervisor.\n");
+            break;
         }
     }
-    
-    req.kind = CMD_STOP;
-    send_control_request(&req, &resp);
-    printf("Forwarded termination directly to container.\n");
-    return 128 + SIGINT;
+    close(wait_sock);
+    return 1;
 }
 
 static int cmd_ps(void)
