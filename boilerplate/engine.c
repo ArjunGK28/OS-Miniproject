@@ -546,7 +546,11 @@ static void reap_children(supervisor_ctx_t *ctx) {
                 }
                 if (ctx->monitor_fd >= 0) unregister_from_monitor(ctx->monitor_fd, rec->id, pid);
                 
-                printf("[Supervisor] Container '%s' has successfully terminated and been reaped.\n", rec->id);
+                if (rec->stop_requested) {
+                    printf("SIGINT was received, sucessfully reaped the container (Host PID: %d)\n", pid);
+                } else {
+                    printf("[Supervisor] Container '%s' normally terminated and reaped.\n", rec->id);
+                }
                 fflush(stdout);
 
                 if (rec->wait_fd >= 0) {
@@ -661,8 +665,6 @@ static int handle_client(supervisor_ctx_t *ctx, int client_fd) {
         while(rec) {
             if (strcmp(rec->id, req.container_id) == 0 && rec->state == CONTAINER_RUNNING) {
                 rec->stop_requested = 1;
-                printf("[Supervisor] Received explicitly forwarded Stop signal from CLI. Sending SIGKILL to container '%s' (Host PID: %d)...\n", rec->id, rec->host_pid);
-                fflush(stdout);
                 kill(rec->host_pid, SIGKILL);
                 found = 1;
                 break;
