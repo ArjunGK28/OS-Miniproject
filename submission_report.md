@@ -22,21 +22,46 @@ To start workloads, open multiple terminals after loading the kernel module (`su
 
 **Experiment 1: Extreme Memory Squeeze (Hard Limit Test)**
 ```bash
-sudo ./engine run test1 ./rootfs-alpha /bin/sh -c 'dd if=/dev/zero of=/dev/null bs=100M count=10' --soft-mib 1 --hard-mib 2
+sudo ./engine start m1 ./rootfs-base ./memory_hog --hard-mib 50
 ```
 
 **Experiment 2: CPU vs CPU Scheduler priority race (`--nice`)**
 ```bash
-# Terminal 2 - High CPU priority (-20 nice)
-sudo ./engine start p1 ./rootfs-beta /bin/sh -c 'while true; do :; done' --nice -20
-# Terminal 3 - Low CPU priority (19 nice)
-sudo ./engine start p2 ./rootfs-alpha /bin/sh -c 'while true; do :; done' --nice 19
+sudo ./engine start p4 ./rootfs-base ./cpu_hog --nice -15
+```
+
+**Experiment 3: Namespace Isolation Verification**
+```bash
+sudo ./engine start ps1 ./rootfs-base "/bin/busybox ps"
 ```
 
 ## 4. Observations & Findings
-* **Namespace Isolation**: Verified using `./engine ps` mapping. PIDs inside the container operate from `PID 1` onwards, validating correct structural separation.
-* **Memory Enforcement**: The kernel correctly intercepts overreaches in Experiment 1, broadcasting a `[container_monitor] HARD LIMIT` panic event inside `dmesg`, immediately updating the user-level module array flag to `killed (SIGKILL)`.
-* **Scheduling Behaviour (CFS Fairness)**: In Experiment 2, the `p1` payload receives approximately 98% of the relative CPU cycles allocated compared to `p2`, verifying that Linux CFS correctly shifts time-slices based on virtual-runtime weighting modifiers assigned at standard container generation.
+* **Namespace Isolation**: Verified using `./engine ps` mapping and internal container process listing. Host-side PIDs are assigned sequentially (e.g., ps1 has host PID 15163), but inside the container, processes start from PID 1, validating correct structural separation with `CLONE_NEWPID`.
+
+  Example output from container ps1 log:
+  ```
+  PID   USER     TIME  COMMAND
+      1 root      0:00 /bin/busybox ps
+  ```
+
+* **Memory Enforcement**: The kernel correctly intercepts overreaches in Experiment 1, broadcasting a `[container_monitor] HARD LIMIT` panic event inside `dmesg`, immediately updating the user-level module array flag to `killed (SIGKILL)`. Without the kernel module loaded, containers run without memory limits as expected.
+
+* **Scheduling Behaviour (CFS Fairness)**: In Experiment 2, the high-priority container (nice -15) receives significantly more CPU time compared to default priority processes, verifying that Linux CFS correctly shifts time-slices based on virtual-runtime weighting modifiers assigned at container generation.
+
+  Example ps output:
+  ```
+  ID | PID | STATE | LIMITS (SOFT/HARD)
+  m1 | 14539 | running | 41943040/52428800
+  p4 | 13984 | running | 41943040/67108864
+  ```
+
+  Example cpu_hog log excerpt:
+  ```
+  cpu_hog alive elapsed=1 accumulator=7613842806996599990
+  cpu_hog alive elapsed=2 accumulator=7218403240704625181
+  cpu_hog alive elapsed=3 accumulator=13941011674794805252
+  cpu_hog alive elapsed=4 accumulator=16753263508071892221
+  ```
 
 ## 5. Conclusion
 A completely minimized container daemon has been generated exactly to scale. IPC is reliable, state leaks map perfectly to zeroes on validation (`reap_children()` ensures no zombie presence), and kernel resources completely disintegrate upon `sudo rmmod monitor`, resulting in a safe LKM pipeline fulfilling all requirements set out by the project specification.

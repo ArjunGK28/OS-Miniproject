@@ -460,10 +460,10 @@ int child_fn(void *arg)
         return 1;
     }
 
-    char *args[] = {"/bin/sh", "-c", cfg->command, NULL};
-    execv("/bin/sh", args);
+    char *args[] = {"/bin/busybox", "sh", "-c", cfg->command, NULL};
+    execv("/bin/busybox", args);
     
-    fprintf(stderr, "[Setup Error] execv('/bin/sh') failed: %s\n", strerror(errno));
+    fprintf(stderr, "[Setup Error] execv('/bin/busybox') failed: %s\n", strerror(errno));
     return 1;
 }
 
