@@ -460,10 +460,13 @@ int child_fn(void *arg)
         return 1;
     }
 
+    char *args[] = {"/bin/busybox", "sh", "-c", cfg->command, NULL};
+    execv("/bin/busybox", args);
     // We use /bin/busybox sh because Windows-shared folders break Linux symlinks (like /bin/sh)
     char *args[] = {"/bin/busybox", "sh", "-c", cfg->command, NULL};
     execv("/bin/busybox", args);
     
+    fprintf(stderr, "[Setup Error] execv('/bin/busybox') failed: %s\n", strerror(errno));
     fprintf(stderr, "[Setup Error] execv('/bin/busybox') failed: %s\n", strerror(errno));
     return 1;
 }
@@ -598,6 +601,8 @@ static int handle_client(supervisor_ctx_t *ctx, int client_fd) {
                     close(pipefd[1]);
 
                     if (pid > 0) {
+                        printf("[Supervisor] Started container '%s' (Host PID: %d)\n", req.container_id, pid);
+                        fflush(stdout);
                         if (ctx->monitor_fd >= 0)
                             register_with_monitor(ctx->monitor_fd, req.container_id, pid, req.soft_limit_bytes, req.hard_limit_bytes);
                         
@@ -657,7 +662,7 @@ static int handle_client(supervisor_ctx_t *ctx, int client_fd) {
         while(rec) {
             if (strcmp(rec->id, req.container_id) == 0 && rec->state == CONTAINER_RUNNING) {
                 rec->stop_requested = 1;
-                kill(rec->host_pid, SIGTERM);
+                kill(rec->host_pid, SIGKILL);
                 found = 1;
                 break;
             }

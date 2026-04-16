@@ -32,3 +32,10 @@ logs/
 *.swp
 *~
 .vscode/
+
+# Test outputs and scripts
+*.txt
+test*.sh
+run_validation_tests.sh
+eval.sh
+sup.out
