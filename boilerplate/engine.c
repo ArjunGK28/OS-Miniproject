@@ -550,6 +550,13 @@ static void reap_children(supervisor_ctx_t *ctx) {
                 }
                 if (ctx->monitor_fd >= 0) unregister_from_monitor(ctx->monitor_fd, rec->id, pid);
                 
+                if (rec->stop_requested) {
+                    printf("SIGINT was received, sucessfully reaped the container (Host PID: %d)\n", pid);
+                } else {
+                    printf("[Supervisor] Container '%s' normally terminated and reaped.\n", rec->id);
+                }
+                fflush(stdout);
+
                 if (rec->wait_fd >= 0) {
                     control_response_t resp;
                     memset(&resp, 0, sizeof(resp));
