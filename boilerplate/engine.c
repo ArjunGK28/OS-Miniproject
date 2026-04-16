@@ -548,6 +548,8 @@ static void reap_children(supervisor_ctx_t *ctx) {
                 
                 if (rec->stop_requested) {
                     printf("SIGINT was received, sucessfully reaped the container (Host PID: %d)\n", pid);
+                } else if (rec->exit_signal != 0) {
+                    printf("[Supervisor] Container '%s' was killed by signal %d and reaped.\n", rec->id, rec->exit_signal);
                 } else {
                     printf("[Supervisor] Container '%s' normally terminated and reaped.\n", rec->id);
                 }

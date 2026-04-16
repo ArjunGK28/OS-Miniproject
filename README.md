@@ -1,111 +1,90 @@
-# Multi-Container Runtime
+# OS Mini-Project: Container Runtime Engine
+**Student/Group Information:** 
+- Name: Arjun G Kanagal
+- SRN: `PES1UG24CS922`
 
-A lightweight Linux container runtime in C with a long-running supervisor and a kernel-space memory monitor.
+- Name: Anirudh Ramesh
+- SRN: `PES1UG24CS929`
 
-Read [`project-guide.md`](project-guide.md) for the full project specification.
-
----
-
-## Getting Started
-
-### 1. Fork the Repository
-
-1. Go to [github.com/shivangjhalani/OS-Jackfruit](https://github.com/shivangjhalani/OS-Jackfruit)
-2. Click **Fork** (top-right)
-3. Clone your fork:
-
-```bash
-git clone https://github.com/<your-username>/OS-Jackfruit.git
-cd OS-Jackfruit
-```
-
-### 2. Set Up Your VM
-
-You need an **Ubuntu 22.04 or 24.04** VM with **Secure Boot OFF**. WSL will not work.
-
-Install dependencies:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential linux-headers-$(uname -r)
-```
-
-### 3. Run the Environment Check
+## Setup and Run Instructions
+Follow these steps to seamlessly build the kernel dependencies and test the architecture locally:
 
 ```bash
 cd boilerplate
-chmod +x environment-check.sh
-sudo ./environment-check.sh
+
+# Build the application suite and workload testing suites
+make clean && make
+
+# Prepare the test rootfs bounds. You must explicitly copy workloads into the environments!
+rm -rf rootfs-test && cp -a rootfs-base rootfs-test
+cp cpu_hog rootfs-test/
+
+# Load the kernel monitoring module 
+sudo insmod monitor.ko
+
+# Launch the Daemon securely in the background
+sudo ./engine supervisor ./rootfs-base &
 ```
 
-Fix any issues reported before moving on.
-
-### 4. Prepare the Root Filesystem
-
+## Example Lifecycle Usage
 ```bash
-mkdir rootfs-base
-wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
-tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
+# Launch a background workload container
+sudo ./engine start c1 ./rootfs-test ./cpu_hog
 
-# Make one writable copy per container you plan to run
-cp -a ./rootfs-base ./rootfs-alpha
-cp -a ./rootfs-base ./rootfs-beta
+# Verify it is currently registered and RUNNING
+./engine ps
+
+# Wait several seconds, then inspect the container's generated logs
+./engine logs c1
+
+# Block the terminal while attaching to a new container instance. 
+# Feel free to trigger Ctrl+C directly against this prompt!
+sudo ./engine run c2 ./rootfs-test ./cpu_hog
+
+# Terminate execution gracefully
+sudo ./engine stop c1
+sudo killall -TERM engine
+sudo rmmod monitor
 ```
 
-Do not commit `rootfs-base/` or `rootfs-*` directories to your repository.
+## Demonstration Screenshots
+Please insert the required screenshots below documenting runtime verification correctness (please replace each block with markdown images capturing your local OS validation):
 
-### 5. Understand the Boilerplate
+1. `kernel_log.png` - `dmesg` output demonstrating module loading and container registration.
+2. `engine_ps.png` - Output demonstrating multiple running/stopped containers.
+3. `engine_run.png` - Foreground container execution correctly blocking.
+4. `engine_stop.png` - Successful invocation of the stop command.
+5. `engine_logs.png` - Live piped output representing `/bin/sh` or a C workload.
+6. `memory_hog.png` - Demonstrating memory restrictions kicking in.
+7. `cpu_hog_high.png` - Priority CPU testing (-10 nice value).
+8. `cpu_hog_low.png` - Priority CPU testing (19 nice value).
 
-The `boilerplate/` folder contains starter files:
+--- 
 
-| File                   | Purpose                                             |
-| ---------------------- | --------------------------------------------------- |
-| `engine.c`             | User-space runtime and supervisor skeleton          |
-| `monitor.c`            | Kernel module skeleton                              |
-| `monitor_ioctl.h`      | Shared ioctl command definitions                    |
-| `Makefile`             | Build targets for both user-space and kernel module |
-| `cpu_hog.c`            | CPU-bound test workload                             |
-| `io_pulse.c`           | I/O-bound test workload                             |
-| `memory_hog.c`         | Memory-consuming test workload                      |
-| `environment-check.sh` | VM environment preflight check                      |
+## Engineering Analysis
 
-Use these as your starting point. You are free to restructure the repository however you want — the submission requirements are listed in the project guide.
+**1. Namespace Isolation (`MS_PRIVATE`)**
+The intrinsic `clone()` execution establishes core container boundaries (e.g. `CLONE_NEWPID` and `CLONE_NEWNS`) to logically fragment process IDs and virtualization trees. However, modern host Operating Systems typically configure the true hardware root (`/`) with `MS_SHARED` propagation. Consequently, any native modification of containerized mounts (such as forcefully mounting a fresh `/proc` tree) silently leaks across the virtualization threshold and mounts pseudo-files directly back onto the Ubuntu Host hardware stack. By securely enforcing `mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL)` *before* issuing our `chroot()` layer lock, we cleanly sever this bidirectional propagation link and isolate all mounts precisely inward.
 
-### 6. Build and Verify
+**2. Kernel Tracing & Irq-Safe Concurrency (`spin_lock_bh`)**
+By attaching `monitor.ko` as a Loadable Kernel Module (LKM), we maintain exceptionally accurate memory tracking (such as RSS metric aggregation bounding) disconnected from User-space thrashing. The kernel intercepts memory scaling bounds mapped to a synchronized `monitor_list`. This list structure is heavily shielded explicitly using `spin_lock_bh` algorithms rather than traditional semaphores. Bottom-half IRQ spinlocks deliberately stall internal software interrupt processing while locked, mathematically preventing local timers from preempting the processor during `ioctl(MONITOR_REGISTER)` link adjustments, effectively dodging race-conditions when containers register initialization sequences simultaneously.
 
-```bash
-cd boilerplate
-make
-```
+**3. State Tracking and Blocking IPC Socket Pipelines (`engine run`)**
+To accurately broadcast state transitions (`SIGCHLD` process cleanup vs active running constraints), our User-space daemon tightly unifies UNIX Domain Socket endpoints with internal object graphs. Our baseline iteration managed blocking (`CMD_WAIT`) features blindly utilizing an infinite 500ms `poll()` loop loop, needlessly squandering frontend client-side resources. By restructuring our system into an asynchronous hook graph, the daemon directly steals the active `AF_UNIX` client socket descriptor (`wait_fd`) and suspends it quietly in memory. When the host OS ultimately routes the `SIGCHLD` process death signal natively, our internal daemon rapidly shifts through `reap_children()`, locates the frozen socket map, dumps the strict process conclusion code directly across the byte stream instantly, and finalizes the socket! 
 
-If this compiles without errors, your environment is ready.
-
-### 7. GitHub Actions Smoke Check
-
-Your fork will inherit a minimal GitHub Actions workflow from this repository.
-
-That workflow only performs CI-safe checks:
-
-- `make -C boilerplate ci`
-- user-space binary compilation (`engine`, `memory_hog`, `cpu_hog`, `io_pulse`)
-- `./boilerplate/engine` with no arguments must print usage and exit with a non-zero status
-
-The CI-safe build command is:
-
-```bash
-make -C boilerplate ci
-```
-
-This smoke check does not test kernel-module loading, supervisor runtime behavior, or container execution.
+**4. CPU Scheduling Experiments (Task 5 Analysis)**
+During isolated benchmark analysis mapping the local OS Completely Fair Scheduler (CFS) logic paths, we stressed extreme process bounds utilizing concurrent `cpu_hog` containers attached to aggressive priority nodes.
+*   **Container 1 (High Priority: `nice = -10`)**: The hardware CFS vastly amplified core cycle distributions in favor of the first container. By studying the `accumulator` print rates, Container 1 continuously rotated processing logic layers measurably faster than the baseline counterpart without incurring standard task latency delays.
+*   **Container 2 (Low Priority: `nice = 19`)**: Surrendering all primary calculation timeshares, Container 2 was aggressively preempted by the CFS architecture. Overall `accumulator` loop execution staggered dramatically backwards in physical time intervals matching the exact intended consequences of `--nice` flags successfully cascading down across our container barriers!
 
 ---
 
-## What to Do Next
+## Design Decisions and Key Tradeoffs
 
-Read [`project-guide.md`](project-guide.md) end to end. It contains:
+**1. Background Log File Descriptors Array Caching vs High-Frequency File Operation IO**
+*Decision:* Rather than manually resolving `fopen()`, array appending, and `fclose()` executions repetitively on a per-`LOG_CHUNK` chunk level (which predictably induces severe VFS (Virtual File System) kernel execution bottlenecks for containers dynamically generating tens of thousands of lines of terminal output instantly), our background `logging_thread` constructs a dedicated `log_cache_item_t` file descriptor registry maintaining 128 asynchronous open handles simultaneously. 
+*Tradeoff:* Constructing this registry forces the supervisor into slightly elevated continuous memory footprints, and mandates an "EOF marker pattern" (a simulated packet bearing `length=0` dispatched organically when `pipe_reader_thread` receives an explicit internal End of File condition upon program termination) to cleanly resolve dangling descriptor references dynamically. Ultimately, bypassing heavy Kernel IO mapping sequences cleanly overrides the minor array-context memory costs.
 
-- The six implementation tasks (multi-container runtime, CLI, logging, kernel monitor, scheduling experiments, cleanup)
-- The engineering analysis you must write
-- The exact submission requirements, including what your `README.md` must contain (screenshots, analysis, design decisions)
-
-Your fork's `README.md` should be replaced with your own project documentation as described in the submission package section of the project guide. (As in get rid of all the above content and replace with your README.md)
+**2. Persistent Object Caching for Daemon Diagnostics vs Implicit Resource Freezing**
+*Decision:* Upon container lifecycle termination (`reap_children` completing and flagging `CONTAINER_EXITED`), the majority of runtime memory spaces typically purge dynamic allocated structures instantly. We intentionally rejected unlinking inactive target structures from the primary daemon `supervisor_ctx_t` linked list mapping blocks. 
+*Tradeoff:* Retaining dormant object pointers scales our daemon memory footprint marginally proportionally matching total lifetime execution commands across a session. However, this perfectly serves user diagnostics logically. By forcing historical node retention, clients querying `./engine ps` hours after critical workloads inherently crash mathematically reconstruct exact failure flags, exit signals, and initialization metadata.

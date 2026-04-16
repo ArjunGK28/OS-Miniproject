@@ -1,0 +1,11 @@
+Started successfully
+ID | PID | STATE | LIMITS (SOFT/HARD)
+alpha | 8624 | running | 41943040/67108864
+PID is |
+kill: failed to parse argument: '|'
+ID | PID | STATE | LIMITS (SOFT/HARD)
+alpha | 8624 | running | 41943040/67108864
+Killing with SIGKILL...
+kill: failed to parse argument: '|'
+ID | PID | STATE | LIMITS (SOFT/HARD)
+alpha | 8624 | running | 41943040/67108864
